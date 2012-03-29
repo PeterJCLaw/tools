@@ -39,4 +39,13 @@ else:
 
 args = [cmd]
 args += sys.argv[2:]
-os.execv( cmds[cmd], args ) 
+try:
+    os.execv( cmds[cmd], args ) 
+except OSError:
+    """
+    Probably windows, which isn't able to just run scripts.
+    Instead, run it in bash, if we can.
+    """
+    args.insert( 0, cmds[cmd].replace('\\', '/') )
+    print args
+    os.execlp( 'bash', '-c', ' '.join(args) )
