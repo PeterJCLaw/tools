@@ -3,6 +3,9 @@ import re
 from trac import TracProxy, WrongServer
 import xmlrpclib
 
+DEFUALT_TITLE = "\n\nDependencies:\n"
+DEFUALT_LIST_PREFIX = " * "
+
 class Ticket(object):
     "A ticket that may have dependencies"
 
@@ -68,8 +71,8 @@ class Ticket(object):
 
         # Rebuild the deplist:
         if len(self.deps) != 0 and self.deptitle == "":
-            self.deptitle = "\n\nDependencies:\n"
-            self.list_prefix = " * "
+            self.deptitle = DEFUALT_TITLE
+            self.list_prefix = DEFUALT_LIST_PREFIX
 
         d = self.prelude + self.deptitle + self.depspace
 
