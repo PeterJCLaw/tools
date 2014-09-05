@@ -9,6 +9,17 @@ DEFUALT_LIST_PREFIX = " * "
 class Ticket(object):
     "A ticket that may have dependencies"
 
+    @staticmethod
+    def build_deplist(deps, proxy, list_prefix = DEFUALT_LIST_PREFIX, title = DEFUALT_TITLE):
+        d = title
+        for ticket_num in deps:
+            _, _, _, dep = proxy.ticket.get(ticket_num)
+
+            d += "{prefix}#{num} {summary}\n".format( prefix = list_prefix,
+                                                      num = ticket_num,
+                                                      summary = dep["summary"] )
+        return d
+
     def __init__(self, num, proxy):
         self.proxy = proxy
         self.num = num
@@ -74,19 +85,13 @@ class Ticket(object):
             self.deptitle = DEFUALT_TITLE
             self.list_prefix = DEFUALT_LIST_PREFIX
 
-        d = self.prelude + self.deptitle + self.depspace
+        title = self.deptitle + self.depspace
+        deplist = self.build_deplist(self.deps, self.proxy, self.list_prefix, title)
 
-        for i, ticket_num in enumerate(self.deps):
-            _, _, _, dep = self.proxy.ticket.get(ticket_num)
+        if not self.deplist_ends_in_newline:
+            deplist = deplist[:-1]
 
-            d += "{prefix}#{num} {summary}".format( prefix = self.list_prefix,
-                                                    num = ticket_num,
-                                                    summary = dep["summary"] )
-
-            if i != len(self.deps)-1 or self.deplist_ends_in_newline:
-                d += "\n"
-
-        d += self.postscript
+        d = self.prelude + deplist + self.postscript
 
         if d == self.desc:
             "Description has not changed"
