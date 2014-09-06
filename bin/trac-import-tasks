@@ -1,0 +1,231 @@
+#!/usr/bin/env python
+# coding=utf8
+
+from __future__ import print_function
+
+import argparse
+from datetime import date
+import glob
+import os
+import os.path
+import subprocess
+import sys
+import yaml
+
+from sr.trac import TracProxy, WrongServer
+from sr.trac.deptree import Ticket as DepTicket
+
+### Utils ###
+
+def dirpaths(root):
+    for fn in os.listdir(root):
+        if fn[0] == '.':
+            continue
+        path = os.path.join(root, fn)
+        if os.path.isdir(path):
+            yield path
+            for p2 in dirpaths(path):
+                yield p2
+
+class TaskPair(object):
+    def __init__(self, ticket_num, task):
+        self.ticket_num = ticket_num
+        self.task = task
+
+    def __repr__(self):
+        return "TaskPair({0}, {1})".format(self.ticket_num, self.task)
+
+    def create(self, tasks, proxy):
+        assert self.ticket_num is None, "Attempted to re-create existing ticket for {0}.".format(self)
+        t = self.task
+        description = "Imported from `{0}`.\n{1}".format(t.path, t.desc)
+        deps = t.resolve_dependencies(tasks)
+        if deps:
+            deps_numbers = []
+            for dep_pair in deps:
+                if not dep_pair.ticket_num:
+                    dep_pair.create(tasks, proxy)
+                deps_numbers.append(dep_pair.ticket_num)
+            deps_desc = DepTicket.build_deplist(deps_numbers, proxy)
+            description += deps_desc
+        num = proxy.create_ticket(t.summary, description, t.attrs_for_ticket)
+        self.ticket_num = num
+
+class Task(object):
+    @staticmethod
+    def name_from_path(path):
+        # Strip path and .yaml
+        return os.path.basename(path)[:-5]
+
+    def __init__(self, path, attrs):
+        self.path = path
+        self.name = self.name_from_path(path)
+        self.summary = attrs['summary']
+        self.desc = attrs['description']
+        del attrs['summary']
+        del attrs['description']
+        self._attrs = attrs
+        self._deps = None
+
+    def __repr__(self):
+        return "Task({0}, {1})".format(self.path, self.summary)
+
+    def resolve_dependencies(self, tasks):
+        if self._deps is None:
+            self._deps = set()
+            for name in self._attrs.get('dependencies', {}):
+                new = tasks.get_tasks(name)
+                # Remove ourselves from the list, if present:
+                new = [tp for tp in new if tp.task != self]
+                if len(new) == 0:
+                    error = "Warning: No tasks found for name '{0}' while resolving " \
+                            "dependencies for '{1}'.".format(name, self.name)
+                    print(error, file=sys.stderr)
+                self._deps |= set(new)
+        return self._deps
+
+    @property
+    def attrs_for_ticket(self):
+        attrs = dict(self._attrs)
+        if 'dependencies' in attrs:
+            del attrs['dependencies']
+        return attrs
+
+    def check_attributes(self, proxy):
+        attrs = self.attrs_for_ticket
+        try:
+            proxy.check_ticket_attrs(attrs)
+        except ValueError as ve:
+            msg = "Checking {0}: {1}".format(self, ve.message)
+            raise ValueError(msg)
+
+class Tasks(object):
+    def __init__(self, root, proxy):
+        self._root = root
+        self._proxy = proxy
+        self._tasks = {}
+        self._load()
+
+    def _load(self):
+        for dirname in dirpaths(self._root):
+            relname = dirname[len(self._root)+1:] + '/'
+            self.get_tasks(relname)
+
+    def get_task(self, name):
+        """ Get a single task by name. """
+        tasks = self.get_tasks(name)
+        assert len(tasks) == 1, "Non-unique task name '{0}'.".format(name)
+        return tasks[0]
+
+    def _get_task(self, file_path):
+        """ Load the task from a file if needed. """
+        name = Task.name_from_path(file_path)
+        if name not in self._tasks:
+            with open(file_path, 'r') as f:
+                y = yaml.load(f.read())
+                rel_path = file_path[len(self._root)+1:]
+                task = Task(rel_path, y)
+                self._tasks[name] = TaskPair(None, task)
+        return self._tasks[name]
+
+    def get_tasks(self, name):
+        """ Get many tasks by name. """
+        if name not in self._tasks:
+            if name.startswith('_'):
+                num = int(name[1:])
+                t = self._tasks[name] = TaskPair(num, None)
+                return [t]
+            else:
+                tasks = []
+                pattern = os.path.join(self._root, name)
+                pattern += "*.yaml"
+                for file_path in glob.glob(pattern):
+                    tasks.append(self._get_task(file_path))
+                return tasks
+        else:
+            return [self._tasks[name]]
+
+    def verify(self):
+        for pair in self._tasks.values():
+            task = pair.task
+            if task:
+                task.resolve_dependencies(self)
+                if not pair.ticket_num:
+                    task.check_attributes(self._proxy)
+
+    def create(self, partial_root):
+        if not partial_root:
+            task_pairs = self._tasks.values()
+        else:
+            task_pairs = [t for n, t in self._tasks.items() if n.startswith(partial_root)]
+
+        no_number = set(tp for tp in task_pairs if not tp.ticket_num)
+
+        for tp in task_pairs:
+            if not tp.ticket_num:
+                tp.create(self, self._proxy)
+
+        # Since these are created recusively on demand, we can't just
+        # build a list in the above loop.
+        created = set(tp for tp in no_number if tp.ticket_num)
+        return created
+
+### Script ###
+
+parser = argparse.ArgumentParser( description = "Import a set of recurring tasks into a trac instance" )
+parser.add_argument("-s", "--server",
+                    help = "Hostname of server to talk to")
+parser.add_argument("-p", "--port",
+                    help = "Server port number to talk to",
+                    type = int)
+parser.add_argument("--check-only", action = "store_true",
+                    help = "Process and check everything, but don't actually create the tickets")
+parser.add_argument("--partial",
+                    help = "Only import a part of the tree, requires a path to the import root" )
+parser.add_argument("repo_root",
+                    nargs = '?',
+                    default = '.',
+                    help = "Only import a part of the tree, requires a path to the import root" )
+args = parser.parse_args()
+
+try:
+    server = TracProxy( server = args.server,
+                        port = args.port
+                      )
+except WrongServer:
+    exit("Error: The specified server is not a Trac instance")
+
+
+summary = "Summary"
+text = "text here"
+component = "component2"
+owner = "the-owner"
+type_ = "defect"
+
+attrs = { 'component': component,
+          'owner': owner,
+          'type': type_ }
+
+#ticketNum = server.create_ticket(summary, text, attrs)
+#print ticketNum
+
+root = args.repo_root
+try:
+    root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"],
+                                   cwd = root)
+except subprocess.CalledProcessError:
+    exit("Error: Not in a tasks repo")
+
+root = root.strip()
+
+tasks = Tasks(root, server)
+tasks.verify()
+
+if args.check_only:
+    print("All valid")
+    exit(0)
+
+added = tasks.create(args.partial)
+
+# TODO: also mention the roots?
+print("Successfully created {0} tickets.".format(len(added)))
