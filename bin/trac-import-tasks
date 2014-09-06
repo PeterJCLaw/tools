@@ -195,20 +195,6 @@ try:
 except WrongServer:
     exit("Error: The specified server is not a Trac instance")
 
-
-summary = "Summary"
-text = "text here"
-component = "component2"
-owner = "the-owner"
-type_ = "defect"
-
-attrs = { 'component': component,
-          'owner': owner,
-          'type': type_ }
-
-#ticketNum = server.create_ticket(summary, text, attrs)
-#print ticketNum
-
 root = args.repo_root
 try:
     root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"],
@@ -227,5 +213,5 @@ if args.check_only:
 
 added = tasks.create(args.partial)
 
-# TODO: also mention the roots?
+# TODO: also mention the roots tickets?
 print("Successfully created {0} tickets.".format(len(added)))
